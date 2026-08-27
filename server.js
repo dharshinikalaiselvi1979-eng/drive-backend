@@ -1,20 +1,30 @@
 require('dotenv').config();
 const cors = require('cors');
 const multer = require('multer');
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 200 * 1024 * 1024 } // 200MB per file — raise/lower as needed
+});
 const express = require('express');
 const supabase = require('./supabaseClient');
 
 const app = express();
-app.use(cors());
 
-// Add this: tells Chrome's Local Network Access check it's OK
+app.use(cors({
+    origin: 'http://localhost:5173', // your frontend origin
+    credentials: true
+}));
+
+// Ensures Chrome's Local Network Access check passes on the
+// preflight (OPTIONS) request too — not just the real request
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    if (req.method === 'OPTIONS') {
+        return res.status(204).end();
+    }
     next();
 });
 
-app.use(express.json());
 app.use(express.json());
 
 const requireAuth = async (req, res, next) => {
@@ -365,6 +375,17 @@ app.get('/folders/:id/path', requireAuth, async (req, res) => {
     }
 
     res.json(path);
+});
+
+// Handle multer errors (e.g. file too large) cleanly instead of a raw 500
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
+    }
+    if (err) {
+        return res.status(500).json({ success: false, error: err.message });
+    }
+    next();
 });
 
 app.listen(PORT, '0.0.0.0', () => {
