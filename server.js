@@ -359,6 +359,6 @@ app.get('/folders/:id/path', requireAuth, async (req, res) => {
     res.json(path);
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
 });
