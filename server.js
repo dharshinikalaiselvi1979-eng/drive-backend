@@ -7,6 +7,14 @@ const supabase = require('./supabaseClient');
 
 const app = express();
 app.use(cors());
+
+// Add this: tells Chrome's Local Network Access check it's OK
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    next();
+});
+
+app.use(express.json());
 app.use(express.json());
 
 const requireAuth = async (req, res, next) => {
