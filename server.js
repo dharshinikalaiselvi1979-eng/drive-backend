@@ -20,6 +20,8 @@ app.use(cors({
     origin: (origin, callback) => {
         // Allow requests with no origin (mobile apps, curl, Postman)
         if (!origin) return callback(null, true);
+        // Allow any onrender.com subdomain (covers all Render deployments)
+        if (origin.endsWith('.onrender.com')) return callback(null, true);
         if (allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
