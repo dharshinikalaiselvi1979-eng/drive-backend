@@ -10,8 +10,22 @@ const supabase = require('./supabaseClient');
 
 const app = express();
 
+const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:4173',
+    process.env.FRONTEND_URL, // set this on Render to your deployed frontend URL
+].filter(Boolean); // removes undefined if FRONTEND_URL is not set
+
 app.use(cors({
-    origin: 'http://localhost:5173', // your frontend origin
+    origin: (origin, callback) => {
+        // Allow requests with no origin (mobile apps, curl, Postman)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error(`CORS: origin ${origin} not allowed`));
+        }
+    },
     credentials: true
 }));
 
