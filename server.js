@@ -59,10 +59,16 @@ app.get('/db-test', async (req, res) => {
 });
 
 app.get('/files', requireAuth, async (req, res) => {
-    const { folder_id } = req.query;
+    const { folder_id, all } = req.query;
 
     let query = supabase.from('files').select('*').eq('user_id', req.userId).is('deleted_at', null);
-    query = folder_id ? query.eq('folder_id', folder_id) : query.is('folder_id', null);
+    if (all === 'true') {
+        // Return all non-deleted files belonging to user across all folders
+    } else if (folder_id) {
+        query = query.eq('folder_id', folder_id);
+    } else {
+        query = query.is('folder_id', null);
+    }
 
     const { data, error } = await query.order('created_at', { ascending: false });
 
@@ -70,14 +76,36 @@ app.get('/files', requireAuth, async (req, res) => {
         return res.status(500).json({ success: false, error: error.message });
     }
 
-    const { data: storageFiles } = await supabase.storage.from('user-files').list('');
+    // Collect all storage files (paginate through them)
+    let allStorageFiles = [];
+    const needsFallback = data.some(f => !f.storage_path);
+    if (needsFallback) {
+        let offset = 0;
+        const limit = 1000;
+        while (true) {
+            const { data: batch } = await supabase.storage.from('user-files').list('', { limit, offset });
+            if (!batch || batch.length === 0) break;
+            allStorageFiles.push(...batch);
+            if (batch.length < limit) break;
+            offset += limit;
+        }
+    }
 
     const filesWithUrls = await Promise.all(data.map(async (file) => {
-        const matchingStorageFile = storageFiles?.find(f => f.name.endsWith(file.name));
         let url = null;
-        if (matchingStorageFile) {
-            const { data: urlData } = await supabase.storage.from('user-files').createSignedUrl(matchingStorageFile.name, 3600);
+        const storagePath = file.storage_path;
+
+        if (storagePath) {
+            // Direct path — fast and reliable
+            const { data: urlData } = await supabase.storage.from('user-files').createSignedUrl(storagePath, 3600);
             url = urlData?.signedUrl || null;
+        } else {
+            // Fallback: match by name suffix for older files
+            const match = allStorageFiles.find(f => f.name.endsWith(file.name));
+            if (match) {
+                const { data: urlData } = await supabase.storage.from('user-files').createSignedUrl(match.name, 3600);
+                url = urlData?.signedUrl || null;
+            }
         }
         return { ...file, url };
     }));
@@ -141,7 +169,7 @@ app.post('/upload', requireAuth, upload.single('file'), async (req, res) => {
 
     const { data: dbData, error: dbError } = await supabase
         .from('files')
-        .insert([{ name: req.file.originalname, size: req.file.size, user_id: req.userId, folder_id: folder_id || null }])
+        .insert([{ name: req.file.originalname, size: req.file.size, user_id: req.userId, folder_id: folder_id || null, storage_path: fileName }])
         .select();
 
     if (dbError) {
@@ -319,12 +347,30 @@ app.delete('/files/:id/permanent', requireAuth, async (req, res) => {
     res.json({ success: true, message: 'File permanently deleted' });
 });
 app.get('/folders', requireAuth, async (req, res) => {
-    const { parent_id } = req.query;
+    const { parent_id, all } = req.query;
 
-    let query = supabase.from('folders').select('*').eq('user_id', req.userId);
-    query = parent_id ? query.eq('parent_id', parent_id) : query.is('parent_id', null);
+    let query = supabase.from('folders').select('*').eq('user_id', req.userId).is('deleted_at', null);
+    if (all === 'true') {
+        // Return all non-deleted folders belonging to user
+    } else if (parent_id) {
+        query = query.eq('parent_id', parent_id);
+    } else {
+        query = query.is('parent_id', null);
+    }
 
     const { data, error } = await query.order('name');
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json(data);
+});
+
+app.get('/folders/trash', requireAuth, async (req, res) => {
+    const { data, error } = await supabase
+        .from('folders')
+        .select('*')
+        .eq('user_id', req.userId)
+        .not('deleted_at', 'is', null)
+        .order('deleted_at', { ascending: false });
+
     if (error) return res.status(500).json({ success: false, error: error.message });
     res.json(data);
 });
@@ -355,6 +401,105 @@ app.post('/folders', requireAuth, async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: error.message });
     res.status(201).json(data[0]);
+});
+
+app.patch('/folders/:id', requireAuth, async (req, res) => {
+    const { id } = req.params;
+    const { name } = req.body;
+
+    if (!name || !name.trim()) {
+        return res.status(400).json({ success: false, error: 'Name is required' });
+    }
+
+    const { data, error } = await supabase
+        .from('folders')
+        .update({ name: name.trim() })
+        .eq('id', id)
+        .eq('user_id', req.userId)
+        .select();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (!data || data.length === 0) return res.status(404).json({ success: false, error: 'Folder not found' });
+
+    res.json({ success: true, record: data[0] });
+});
+
+app.patch('/folders/:id/star', requireAuth, async (req, res) => {
+    const { id } = req.params;
+    const { starred } = req.body;
+
+    if (typeof starred !== 'boolean') {
+        return res.status(400).json({ success: false, error: 'starred (boolean) is required' });
+    }
+
+    const { data, error } = await supabase
+        .from('folders')
+        .update({ starred })
+        .eq('id', id)
+        .eq('user_id', req.userId)
+        .select();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (!data || data.length === 0) return res.status(404).json({ success: false, error: 'Folder not found' });
+
+    res.json({ success: true, record: data[0] });
+});
+
+app.delete('/folders/:id', requireAuth, async (req, res) => {
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+        .from('folders')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', id)
+        .eq('user_id', req.userId)
+        .select();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (!data || data.length === 0) return res.status(404).json({ success: false, error: 'Folder not found' });
+
+    res.json({ success: true, message: 'Folder moved to trash' });
+});
+
+app.patch('/folders/:id/restore', requireAuth, async (req, res) => {
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+        .from('folders')
+        .update({ deleted_at: null })
+        .eq('id', id)
+        .eq('user_id', req.userId)
+        .select();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (!data || data.length === 0) return res.status(404).json({ success: false, error: 'Folder not found' });
+
+    res.json({ success: true, message: 'Folder restored', record: data[0] });
+});
+
+app.delete('/folders/:id/permanent', requireAuth, async (req, res) => {
+    const { id } = req.params;
+
+    const { data: folderRecord, error: fetchError } = await supabase
+        .from('folders')
+        .select('*')
+        .eq('id', id)
+        .eq('user_id', req.userId)
+        .single();
+
+    if (fetchError || !folderRecord) {
+        return res.status(404).json({ success: false, error: 'Folder not found' });
+    }
+
+    const { error: dbError } = await supabase
+        .from('folders')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', req.userId);
+
+    if (dbError) return res.status(500).json({ success: false, error: dbError.message });
+
+    res.json({ success: true, message: 'Folder permanently deleted' });
 });
 
 app.get('/folders/:id/path', requireAuth, async (req, res) => {
